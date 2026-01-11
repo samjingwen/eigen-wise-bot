@@ -1,0 +1,12 @@
+{
+  "id": 1,
+  "question": "See Question #1.",
+  "options": [
+    "1",
+    "2",
+    "3",
+    "4"
+  ],
+  "correctOptionId": 3,
+  "explanation": "Proof is left as an exercise to the reader."
+}
