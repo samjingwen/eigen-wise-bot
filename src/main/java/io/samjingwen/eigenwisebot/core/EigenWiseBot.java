@@ -5,17 +5,18 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.io.ClassPathResource;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateConsumer;
 import org.telegram.telegrambots.meta.api.methods.polls.SendPoll;
+import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
 import org.telegram.telegrambots.meta.api.objects.InputFile;
 import org.telegram.telegrambots.meta.api.objects.Update;
@@ -31,6 +32,7 @@ public class EigenWiseBot implements LongPollingSingleThreadUpdateConsumer {
 
   private final AppProperties appProperties;
   private final TelegramClient telegramClient;
+  private final ChatManager chatManager;
   private final ObjectMapper objectMapper;
 
   private List<Quiz> quizzes = new ArrayList<>();
@@ -52,42 +54,85 @@ public class EigenWiseBot implements LongPollingSingleThreadUpdateConsumer {
     }
 
     if (update.hasMessage() && update.getMessage().hasText()) {
-      long chatId = update.getMessage().getChatId();
-      String message = update.getMessage().getText();
+      Long chatId = update.getMessage().getChatId();
+      Integer threadId = update.getMessage().getMessageThreadId();
+      ChatTopic chatTopic = new ChatTopic(chatId, threadId);
 
-      if (message.equalsIgnoreCase("/start")) {
-        Quiz quiz = quizzes.getFirst();
-        sendImage(chatId, quiz.id());
-        sendPoll(chatId, quiz);
+      String message = update.getMessage().getText().trim();
+
+      if (message.startsWith("/ewb")) {
+        String[] parts = message.split("\\s+", 2);
+        String command = (parts.length > 1) ? parts[1].toLowerCase() : "";
+        switch (command) {
+          case "random" -> {
+            sendRandomQuiz(chatTopic, false);
+          }
+          case "register" -> {
+            chatManager.addChat(chatTopic);
+            sendMessage(chatTopic, "You are now registered for daily quizzes.");
+          }
+          case "unregister" -> {
+            chatManager.removeChat(chatTopic);
+            sendMessage(chatTopic, "You are now unregistered for daily quizzes.");
+          }
+          case "" -> sendMessage(chatTopic, "Please provide a command. Try '/eiw random'");
+          default -> sendMessage(chatTopic, "Unknown command. Try '/eiw random'");
+        }
       }
     }
+  }
+
+  @Scheduled(cron = "0 0 21 * * *")
+  public void sendDailyQuiz() {
+    log.info("Starting scheduled daily quiz for all registered chats.");
+    for (ChatTopic chatTopic : chatManager.getChats()) {
+      sendRandomQuiz(chatTopic, true);
+    }
+  }
+
+  private void sendRandomQuiz(ChatTopic chatTopic, boolean isDaily) {
+    if (quizzes.isEmpty()) return;
+
+    int randomIndex = ThreadLocalRandom.current().nextInt(quizzes.size());
+    Quiz quiz = quizzes.get(randomIndex);
+
+    String message =
+        isDaily
+            ? "Here's your daily quiz on Advanced Linear Algebra:"
+            : "Here's your random quiz on Advanced Linear Algebra:";
+
+    sendMessage(chatTopic, message);
+    sendImage(chatTopic, quiz.id());
+    sendPoll(chatTopic, quiz);
   }
 
   private List<Quiz> loadQuestionsFromResources() {
     List<Quiz> questions = new ArrayList<>();
-    try {
-      PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
-      Resource[] resources = resolver.getResources("classpath:quiz/*.json");
-
-      for (Resource resource : resources) {
-        try {
-          Quiz question = objectMapper.readValue(resource.getInputStream(), Quiz.class);
-          questions.add(question);
-          log.info("Loaded question from: {}", resource.getFilename());
-        } catch (IOException e) {
-          log.error("Failed to load question from: {}", resource.getFilename(), e);
+    for (int i = 0; i <= 5; i++) {
+      String resourcePath = String.format("quiz/%d/poll.json", i);
+      try {
+        ClassPathResource resource = new ClassPathResource(resourcePath);
+        if (resource.exists()) {
+          try (InputStream is = resource.getInputStream()) {
+            Quiz question = objectMapper.readValue(is, Quiz.class);
+            questions.add(question);
+            log.info("Loaded question from: {}", resourcePath);
+          }
+        } else {
+          log.warn("Question file not found: {}", resourcePath);
         }
+      } catch (IOException e) {
+        log.error("Failed to load question from: {}", resourcePath, e);
       }
-    } catch (IOException e) {
-      log.error("Failed to load questions from resources", e);
     }
     return questions;
   }
 
-  private void sendPoll(Long chatId, Quiz quiz) {
+  private void sendPoll(ChatTopic chatTopic, Quiz quiz) {
     SendPoll sendPoll =
         SendPoll.builder()
-            .chatId(chatId)
+            .chatId(chatTopic.chatId())
+            .messageThreadId(chatTopic.threadId())
             .question(quiz.question())
             .options(
                 quiz.options().stream()
@@ -101,30 +146,60 @@ public class EigenWiseBot implements LongPollingSingleThreadUpdateConsumer {
 
     try {
       telegramClient.execute(sendPoll);
-      log.info("Sent poll to chat ID: {}", chatId);
+      log.info("Sent poll to chat ID: {}, thread ID: {}", chatTopic.chatId(), chatTopic.threadId());
     } catch (TelegramApiException e) {
-      log.error("Failed to send poll to chat ID: {}", chatId, e);
+      log.error(
+          "Failed to send poll to chat ID: {}, thread ID: {}",
+          chatTopic.chatId(),
+          chatTopic.threadId(),
+          e);
     }
   }
 
-  private void sendImage(Long chatId, int id) {
-    String resourcePath = String.format("quiz/img_%d.jpg", id);
+  private void sendImage(ChatTopic chatTopic, int id) {
+    String resourcePath = String.format("quiz/%d/img.jpg", id);
     try {
       ClassPathResource imgFile = new ClassPathResource(resourcePath);
 
       try (InputStream is = imgFile.getInputStream()) {
         SendPhoto photo =
             SendPhoto.builder()
-                .chatId(chatId)
+                .chatId(chatTopic.chatId())
+                .messageThreadId(chatTopic.threadId())
                 .photo(new InputFile(is, imgFile.getFilename()))
                 .caption(String.format("Question #%d", id))
                 .build();
 
         telegramClient.execute(photo);
-        log.info("Sent photo from classpath: {} to chat ID: {}", resourcePath, chatId);
+        log.info(
+            "Sent photo from classpath: {} to chat ID: {}, thread ID: {}",
+            resourcePath,
+            chatTopic.chatId(),
+            chatTopic.threadId());
       }
     } catch (IOException | TelegramApiException e) {
       log.error("Failed to send photo from classpath: {}", resourcePath, e);
+    }
+  }
+
+  private void sendMessage(ChatTopic chatTopic, String text) {
+    SendMessage sendMessage =
+        SendMessage.builder()
+            .chatId(chatTopic.chatId())
+            .messageThreadId(chatTopic.threadId())
+            .text(text)
+            .build();
+
+    try {
+      telegramClient.execute(sendMessage);
+      log.info(
+          "Sent message to chat ID: {}, thread ID: {}", chatTopic.chatId(), chatTopic.threadId());
+    } catch (TelegramApiException e) {
+      log.error(
+          "Failed to send message to chat ID: {}, thread ID: {}",
+          chatTopic.chatId(),
+          chatTopic.threadId(),
+          e);
     }
   }
 }
