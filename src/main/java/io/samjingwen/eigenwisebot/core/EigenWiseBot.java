@@ -65,7 +65,7 @@ public class EigenWiseBot implements LongPollingSingleThreadUpdateConsumer {
         String command = (parts.length > 1) ? parts[1].toLowerCase() : "";
         switch (command) {
           case "random" -> {
-            sendRandomQuiz(chatTopic, false);
+            sendRandomQuiz(chatTopic);
           }
           case "register" -> {
             chatManager.addChat(chatTopic);
@@ -82,26 +82,21 @@ public class EigenWiseBot implements LongPollingSingleThreadUpdateConsumer {
     }
   }
 
-  @Scheduled(cron = "0 0 21 * * *")
+  @Scheduled(cron = "${QUIZ_SCHEDULE}")
   public void sendDailyQuiz() {
     log.info("Starting scheduled daily quiz for all registered chats.");
     for (ChatTopic chatTopic : chatManager.getChats()) {
-      sendRandomQuiz(chatTopic, true);
+      sendRandomQuiz(chatTopic);
     }
   }
 
-  private void sendRandomQuiz(ChatTopic chatTopic, boolean isDaily) {
+  private void sendRandomQuiz(ChatTopic chatTopic) {
     if (quizzes.isEmpty()) return;
 
     int randomIndex = ThreadLocalRandom.current().nextInt(quizzes.size());
     Quiz quiz = quizzes.get(randomIndex);
 
-    String message =
-        isDaily
-            ? "Here's your daily quiz on Advanced Linear Algebra:"
-            : "Here's your random quiz on Advanced Linear Algebra:";
-
-    sendMessage(chatTopic, message);
+    sendMessage(chatTopic, "Here's a question on Advanced Linear Algebra:");
     sendImage(chatTopic, quiz.id());
     sendPoll(chatTopic, quiz);
   }
