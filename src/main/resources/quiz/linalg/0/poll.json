@@ -1,0 +1,12 @@
+{
+  "id": 0,
+  "question": "See Question #0.",
+  "options": [
+    "1",
+    "2",
+    "5",
+    "10"
+  ],
+  "correctOptionId": 1,
+  "explanation": "det(A) = (2)(3) - (1)(4) = 6 - 4 = 2."
+}

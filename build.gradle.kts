@@ -43,6 +43,18 @@ dependencies {
 	testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
+tasks.register<Exec>("generateImages") {
+	description = "Generate images from LaTeX files"
+	group = "build"
+
+	commandLine("bash", "${projectDir}/util/generate_images.sh")
+	workingDir(projectDir)
+}
+
+tasks.named("processResources") {
+	dependsOn("generateImages")
+}
+
 tasks.withType<Test> {
 	useJUnitPlatform()
 }

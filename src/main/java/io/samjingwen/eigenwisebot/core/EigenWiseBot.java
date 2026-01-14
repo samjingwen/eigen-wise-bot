@@ -3,8 +3,7 @@ package io.samjingwen.eigenwisebot.core;
 import io.samjingwen.eigenwisebot.config.AppProperties;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
@@ -35,7 +34,7 @@ public class EigenWiseBot implements LongPollingSingleThreadUpdateConsumer {
   private final ChatManager chatManager;
   private final ObjectMapper objectMapper;
 
-  private List<Quiz> quizzes = new ArrayList<>();
+  private Map<Module, List<Quiz>> quizzes = new HashMap<>();
 
   public String getToken() {
     return appProperties.getToken();
@@ -44,7 +43,8 @@ public class EigenWiseBot implements LongPollingSingleThreadUpdateConsumer {
   @EventListener(ApplicationReadyEvent.class)
   public void onApplicationEvent() {
     this.quizzes = loadQuestionsFromResources();
-    log.info("Successfully loaded {} questions from resources.", quizzes.size());
+    int totalQuestions = quizzes.values().stream().mapToInt(List::size).sum();
+    log.info("Successfully loaded {} questions from resources.", totalQuestions);
   }
 
   @Override
@@ -61,22 +61,35 @@ public class EigenWiseBot implements LongPollingSingleThreadUpdateConsumer {
       String message = update.getMessage().getText().trim();
 
       if (message.startsWith("/ewb")) {
-        String[] parts = message.split("\\s+", 2);
+        String[] parts = message.split("\\s+", 3);
         String command = (parts.length > 1) ? parts[1].toLowerCase() : "";
         switch (command) {
           case "random" -> {
-            sendRandomQuiz(chatTopic);
+            Module module = parseModule(chatTopic, parts, "random");
+            if (module != null) {
+              sendRandomQuiz(chatTopic, module);
+            }
           }
           case "register" -> {
-            chatManager.addChat(chatTopic);
-            sendMessage(chatTopic, "You are now registered for daily quizzes.");
+            Module module = parseModule(chatTopic, parts, "register");
+            if (module != null) {
+              chatManager.register(chatTopic, module);
+              sendMessage(
+                  chatTopic,
+                  "Success! Registered for daily " + module.getDisplayName() + " quizzes.");
+            }
           }
           case "unregister" -> {
-            chatManager.removeChat(chatTopic);
-            sendMessage(chatTopic, "You are now unregistered for daily quizzes.");
+            Module module = parseModule(chatTopic, parts, "unregister");
+            if (module != null) {
+              chatManager.unregister(chatTopic, module);
+              sendMessage(
+                  chatTopic,
+                  "You have been unregistered from daily " + module.getDisplayName() + " quizzes.");
+            }
           }
-          case "" -> sendMessage(chatTopic, "Please provide a command. Try '/eiw random'");
-          default -> sendMessage(chatTopic, "Unknown command. Try '/eiw random'");
+          case "" -> sendMessage(chatTopic, "Please provide a command. Try '/ewb random'");
+          default -> sendMessage(chatTopic, "Unknown command. Try '/ewb random'");
         }
       }
     }
@@ -85,45 +98,76 @@ public class EigenWiseBot implements LongPollingSingleThreadUpdateConsumer {
   @Scheduled(cron = "${QUIZ_SCHEDULE}")
   public void sendDailyQuiz() {
     log.info("Starting scheduled daily quiz for all registered chats.");
-    for (ChatTopic chatTopic : chatManager.getChats()) {
-      sendRandomQuiz(chatTopic);
-    }
+    chatManager.getChats().forEach(this::sendRandomQuizzes);
   }
 
-  private void sendRandomQuiz(ChatTopic chatTopic) {
-    if (quizzes.isEmpty()) return;
-
-    int randomIndex = ThreadLocalRandom.current().nextInt(quizzes.size());
-    Quiz quiz = quizzes.get(randomIndex);
-
-    sendMessage(chatTopic, "Here's a question on Advanced Linear Algebra:");
-    sendImage(chatTopic, quiz.id());
-    sendPoll(chatTopic, quiz);
+  private void sendRandomQuizzes(ChatTopic chatTopic, Set<Module> modules) {
+    modules.forEach(module -> sendRandomQuiz(chatTopic, module));
   }
 
-  private List<Quiz> loadQuestionsFromResources() {
-    List<Quiz> questions = new ArrayList<>();
-    for (int i = 0; i <= 5; i++) {
-      String resourcePath = String.format("quiz/%d/poll.json", i);
-      try {
-        ClassPathResource resource = new ClassPathResource(resourcePath);
-        if (resource.exists()) {
-          try (InputStream is = resource.getInputStream()) {
-            Quiz question = objectMapper.readValue(is, Quiz.class);
-            questions.add(question);
-            log.info("Loaded question from: {}", resourcePath);
+  private void sendRandomQuiz(ChatTopic chatTopic, Module module) {
+    List<Quiz> moduleQuizzes = quizzes.get(module);
+    if (moduleQuizzes == null || moduleQuizzes.isEmpty()) return;
+
+    int randomIndex = ThreadLocalRandom.current().nextInt(moduleQuizzes.size());
+    Quiz quiz = moduleQuizzes.get(randomIndex);
+
+    sendMessage(chatTopic, "Here's a question on " + module.getDisplayName() + ":");
+    sendImage(chatTopic, module, quiz.id());
+    sendPoll(chatTopic, module, quiz);
+  }
+
+  private Map<Module, List<Quiz>> loadQuestionsFromResources() {
+    Map<Module, List<Quiz>> questions = new HashMap<>();
+    for (Module module : Module.values()) {
+      List<Quiz> moduleQuizzes = new ArrayList<>();
+      for (int i = 0; i < module.getCount(); i++) {
+        String resourcePath = String.format("quiz/%s/%d/poll.json", module.getCode(), i);
+        try {
+          ClassPathResource resource = new ClassPathResource(resourcePath);
+          if (resource.exists()) {
+            try (InputStream is = resource.getInputStream()) {
+              Quiz question = objectMapper.readValue(is, Quiz.class);
+              moduleQuizzes.add(question);
+              log.info("Loaded question from: {}", resourcePath);
+            }
+          } else {
+            log.warn("Question file not found: {}", resourcePath);
           }
-        } else {
-          log.warn("Question file not found: {}", resourcePath);
+        } catch (IOException e) {
+          log.error("Failed to load question from: {}", resourcePath, e);
         }
-      } catch (IOException e) {
-        log.error("Failed to load question from: {}", resourcePath, e);
+      }
+      if (!moduleQuizzes.isEmpty()) {
+        questions.put(module, moduleQuizzes);
+      }
+      if (!moduleQuizzes.isEmpty()) {
+        questions.put(module, moduleQuizzes);
       }
     }
     return questions;
   }
 
-  private void sendPoll(ChatTopic chatTopic, Quiz quiz) {
+  private Module parseModule(ChatTopic chatTopic, String[] parts, String commandAction) {
+    if (parts.length <= 2) {
+      sendMessage(
+          chatTopic,
+          String.format(
+              "Please specify a module (linalg or advlinalg). Example: /ewb %s linalg",
+              commandAction));
+      return null;
+    }
+
+    String arg = parts[2];
+    return Module.fromString(arg)
+        .orElseGet(
+            () -> {
+              sendMessage(chatTopic, "Unknown module '" + arg + "'. Use 'linalg' or 'advlinalg'.");
+              return null;
+            });
+  }
+
+  private void sendPoll(ChatTopic chatTopic, Module module, Quiz quiz) {
     SendPoll sendPoll =
         SendPoll.builder()
             .chatId(chatTopic.chatId())
@@ -151,8 +195,8 @@ public class EigenWiseBot implements LongPollingSingleThreadUpdateConsumer {
     }
   }
 
-  private void sendImage(ChatTopic chatTopic, int id) {
-    String resourcePath = String.format("quiz/%d/img.jpg", id);
+  private void sendImage(ChatTopic chatTopic, Module module, int id) {
+    String resourcePath = String.format("quiz/%s/%d/img.jpg", module.getCode(), id);
     try {
       ClassPathResource imgFile = new ClassPathResource(resourcePath);
 

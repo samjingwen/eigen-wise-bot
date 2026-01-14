@@ -1,21 +1,36 @@
 package io.samjingwen.eigenwisebot.core;
 
-import java.util.HashSet;
-import java.util.Set;
-import lombok.Getter;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.stereotype.Component;
 
-@Getter
 @Component
 public class ChatManager {
 
-  private final Set<ChatTopic> chats = new HashSet<>();
+  private final Map<ChatTopic, Set<Module>> chats = new ConcurrentHashMap<>();
 
-  public void addChat(ChatTopic chatTopic) {
-    chats.add(chatTopic);
+  public Map<ChatTopic, Set<Module>> getChats() {
+    return Map.copyOf(chats);
   }
 
-  public void removeChat(ChatTopic chatTopic) {
-    chats.remove(chatTopic);
+  public void register(ChatTopic chatTopic, Module module) {
+    chats.compute(
+        chatTopic,
+        (key, modules) -> {
+          if (modules == null) {
+            modules = Collections.synchronizedSet(EnumSet.noneOf(Module.class));
+          }
+          modules.add(module);
+          return modules;
+        });
+  }
+
+  public void unregister(ChatTopic chatTopic, Module module) {
+    chats.computeIfPresent(
+        chatTopic,
+        (key, modules) -> {
+          modules.remove(module);
+          return modules.isEmpty() ? null : modules;
+        });
   }
 }
